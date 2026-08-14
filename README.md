@@ -20,6 +20,42 @@ runtime can be launched by double-clicking rather than from a terminal.
 | ![Plugin settings](docs/images/03-settings-plugins.png) | ![General settings](docs/images/04-settings-general.png) |
 | Configuring the kernel's plugins | Presets, permissions, and appearance |
 
+# DeepSeek Harness Desktop  (Deepin / UOS / Linux x86_64 build)
+
+This is a **Deepin / UOS / Linux x86_64 build** of the community
+[DeepSeek Harness Desktop](https://github.com/sleep2agi/DeepSeek-Harness-Desktop)
+shell. The upstream project targets Windows and macOS; this fork keeps the same
+Electron shell intact and adds a Linux packaging path (`deb` + `AppImage`) with
+all of the upstream's security, readiness, and process-tree policies preserved.
+
+![Running on Deepin 25](docs/images/05-deepin-running.png)
+
+## About this fork
+
+Everything in this repository is adapted from — and built on top of — two
+upstream projects. Both are public, both use pinned public dependencies, and
+neither is being forked or vendored here:
+
+- **deepseek-ai/deepseek-harness** — the `dsh` kernel and web UI.
+  <https://github.com/deepseek-ai/deepseek-harness>
+- **sleep2agi/DeepSeek-Harness-Desktop** — the Electron desktop shell for
+  Windows and macOS, on top of which this Linux build is based.
+  <https://github.com/sleep2agi/DeepSeek-Harness-Desktop>
+
+The Linux-only differences from upstream are:
+
+1. `upstream.lock.json` adds a `linux-x64` Node runtime entry, checksum-verified
+   against nodejs.org, so the kernel is still run on a real Node build rather
+   than Electron-as-Node.
+2. `tools/install-kernel.js` swaps `node-pty` to a release that still ships its
+   Linux native source, since upstream `node-pty@1.1.0` removed its `src/unix/`
+   sources and `npm rebuild` fails on Linux without intervention.
+3. `tools/after-pack.js` validates that the bundled `node` binary is present in
+   the packaged `resources/kernel/` on Linux, as it already does for Windows
+   and macOS.
+4. `package.json` `build.linux` config adds `deb` and `AppImage` targets with
+   the runtime deps a Deepin installation needs.
+
 Everything above is the upstream web UI, served by the kernel and rendered in the shell's
 window. The shell contributes the window, the process, and the security policy around
 them — not the interface.

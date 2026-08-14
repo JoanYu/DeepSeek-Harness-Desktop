@@ -12,11 +12,40 @@ node_modules/
 resources/kernel/
 
 # --- Build output ---
+# electron-builder writes the unpacked Linux dir, the .deb, the .AppImage, and
+# debug files into release/. `out/` and `dist/` are conventional names other
+# build steps might use.
 out/
 dist/
 build/
 release/
+release-unpacked/
+linux-unpacked/
 *.tsbuildinfo
+
+# --- electron-builder / Electron cache ---
+# Downloaded Electron zips, fpm binaries, and 7zip are reused between builds but
+# should not enter the source tree.
+electron-builder-cache/
+*.AppImage
+*.deb
+*.rpm
+*.snap
+*.snap.*
+builder-debug.yml
+latest-linux.yml
+latest.yml
+nsis/
+
+# --- Temporary files from the build / verification run ---
+# Anything left in /tmp-style scratch locations of the project root.
+tmp/
+scratch/
+.cache/
+.tmp/
+*.tmp
+*.temp
+.cache-*
 
 # --- Environment & secrets ---
 .env
@@ -41,3 +70,8 @@ Thumbs.db
 logs/
 *.log
 npm-debug.log*
+
+# --- TypeScript / prebuilt binary detritus ---
+.tsbuildinfo
+.tsdown-cache/
+*.tsbuildinfo

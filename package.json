@@ -79,22 +79,13 @@
       "vendor": "DeepSeek Harness Desktop Community",
       "description": "DeepSeek Harness Desktop — a desktop shell for the DeepSeek Harness agent runtime",
       "synopsis": "Desktop shell for DeepSeek Harness (dsh) agent runtime",
-      "desktop": {
-        "Name": "DeepSeek Harness Desktop",
-        "Comment": "Desktop shell for the DeepSeek Harness (dsh) agent runtime",
-        "Categories": "Development;Utility;",
-        "Keywords": "deepseek;dsh;agent;ai;harness;",
-        "StartupWMClass": "DeepSeek Harness Desktop"
-      },
       "target": [
         { "target": "deb", "arch": ["x64"] },
         { "target": "AppImage", "arch": ["x64"] }
       ],
-      "maintainer": "DeepSeek Harness Desktop Community <noreply@example.com>",
-      "compression": "xz"
+      "maintainer": "DeepSeek Harness Desktop Community <noreply@example.com>"
     },
     "deb": {
-      "priority": "optional",
       "depends": [
         "libgtk-3-0",
         "libnotify4",
