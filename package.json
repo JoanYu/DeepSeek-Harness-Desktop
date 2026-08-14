@@ -1,0 +1,124 @@
+{
+  "name": "deepseek-harness-deepin",
+  "productName": "DeepSeek Harness Desktop",
+  "version": "0.1.2",
+  "description": "Deepin/UOS desktop shell for the DeepSeek Harness (dsh) agent runtime — community-maintained Linux build of the official desktop shell.",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/main.js",
+  "homepage": "https://github.com/sleep2agi/DeepSeek-Harness-Desktop",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sleep2agi/DeepSeek-Harness-Desktop.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sleep2agi/DeepSeek-Harness-Desktop/issues"
+  },
+  "author": {
+    "name": "sleep2agi",
+    "url": "https://github.com/sleep2agi"
+  },
+  "engines": {
+    "node": ">=22.15.0"
+  },
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test \"src/**/*.test.js\"",
+    "test:e2e": "node --test \"tests/**/*.test.js\"",
+    "test:all": "npm run test && npm run test:e2e",
+    "typecheck": "tsc --noEmit",
+    "kernel:install": "node tools/install-kernel.js && node tools/install-node.js && node tools/prune-kernel.js",
+    "scan:leaks": "node tools/scan-leaks.js",
+    "prepack:app": "npm run test && npm run scan:leaks && npm run kernel:install",
+    "pack": "npm run prepack:app && electron-builder --dir",
+    "dist": "npm run prepack:app && electron-builder --publish never",
+    "dist:win": "npm run prepack:app && electron-builder --win --publish never",
+    "dist:mac": "npm run prepack:app && electron-builder --mac --publish never",
+    "dist:linux": "npm run prepack:app && electron-builder --linux --publish never",
+    "dist:linux:deb": "npm run prepack:app && electron-builder --linux deb --publish never",
+    "dist:linux:appimage": "npm run prepack:app && electron-builder --linux AppImage --publish never"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "electron": "^43.4.0",
+    "electron-builder": "^26.15.3",
+    "typescript": "^5.9.3"
+  },
+  "build": {
+    "appId": "org.deepin.deepseek-harness-desktop",
+    "productName": "DeepSeek Harness Desktop",
+    "artifactName": "DeepSeek-Harness-Desktop-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "src/**/*.js",
+      "!src/**/*.test.js",
+      "assets/icon.png",
+      "package.json",
+      "LICENSE",
+      "NOTICE"
+    ],
+    "asar": true,
+    "afterPack": "tools/after-pack.js",
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "zip", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    },
+    "linux": {
+      "icon": "assets/icon.png",
+      "category": "Development",
+      "vendor": "DeepSeek Harness Desktop Community",
+      "description": "DeepSeek Harness Desktop — a desktop shell for the DeepSeek Harness agent runtime",
+      "synopsis": "Desktop shell for DeepSeek Harness (dsh) agent runtime",
+      "desktop": {
+        "Name": "DeepSeek Harness Desktop",
+        "Comment": "Desktop shell for the DeepSeek Harness (dsh) agent runtime",
+        "Categories": "Development;Utility;",
+        "Keywords": "deepseek;dsh;agent;ai;harness;",
+        "StartupWMClass": "DeepSeek Harness Desktop"
+      },
+      "target": [
+        { "target": "deb", "arch": ["x64"] },
+        { "target": "AppImage", "arch": ["x64"] }
+      ],
+      "maintainer": "DeepSeek Harness Desktop Community <noreply@example.com>",
+      "compression": "xz"
+    },
+    "deb": {
+      "priority": "optional",
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0"
+      ]
+    },
+    "appImage": {
+      "artifactName": "DeepSeek-Harness-Desktop-${version}-${arch}.AppImage"
+    },
+    "mac": {
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.developer-tools",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "assets/entitlements.mac.plist",
+      "entitlementsInherit": "assets/entitlements.mac.plist",
+      "target": ["dmg", "zip"]
+    },
+    "dmg": {
+      "title": "${productName} ${version}"
+    }
+  }
+}
