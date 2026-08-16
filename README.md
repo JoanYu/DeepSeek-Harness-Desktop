@@ -56,6 +56,25 @@ The Linux-only differences from upstream are:
 4. `package.json` `build.linux` config adds `deb` and `AppImage` targets with
    the runtime deps a Deepin installation needs.
 
+## Linux-only features added on top of upstream
+
+- **Hidden menu bar.** The chat UI is driven entirely by the rendered web
+  surface; `Menu.setApplicationMenu(null)` plus `autoHideMenuBar: true` take
+  the OS menu bar off the window on every platform.
+- **System tray + hide-to-tray.** `src/tray.js` registers an Electron `Tray`
+  with a Show/Hide/Quit menu; clicking the X on the main window hides it
+  instead of quitting, and the kernel keeps running in the background. An
+  explicit Quit (tray menu or `before-quit`) is what tears the whole app down.
+- **Background-completion toast.** `src/preload.js` exposes exactly two
+  methods (`shell.notify`, `shell.onShown`) through a sandboxed
+  `contextBridge` — the entire renderer-facing surface.
+  `src/dom-observer.js` is injected via `webContents.executeJavaScript` after
+  every page load and uses a `MutationObserver` to watch the kernel's web UI
+  for an in-flight indicator (`aria-busy="true"`, `data-state="generating"`,
+  `思考中` / `生成中`, and the `dsh-generating` / `dsh-thinking` /
+  `dsh-streaming` class names). The busy → idle transition fires a desktop
+  notification through the shell.
+
 Everything above is the upstream web UI, served by the kernel and rendered in the shell's
 window. The shell contributes the window, the process, and the security policy around
 them — not the interface.

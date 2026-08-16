@@ -12,13 +12,15 @@ import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { app, BrowserWindow, dialog, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 import { KernelProcess, findFreePort } from './kernel-process.js'
 import { buildKernelArgs, buildKernelEnv, isSupportedNodeVersion } from './kernel-runtime.js'
 import { nodeBinaryName } from './node-runtime.js'
 import { httpProbe, waitForReady } from './readiness.js'
 import { buildShellPatch, serialisePatch } from './shell-patch.js'
 import { writeFile } from 'node:fs/promises'
+import { ShellTray, trayIconPath } from './tray.js'
+import { OBSERVER_SOURCE } from './dom-observer.js'
 import {
   SECURE_WEB_PREFERENCES,
   classifyWindowOpen,
@@ -33,6 +35,8 @@ const here = dirname(fileURLToPath(import.meta.url))
 let kernel = null
 /** @type {BrowserWindow | null} */
 let mainWindow = null
+/** @type {ShellTray | null} */
+let tray = null
 
 /**
  * Where the bundled kernel lives, packaged or not.
@@ -152,12 +156,31 @@ function createWindow(origin) {
     backgroundColor: '#1b1b1f',
     title: 'DeepSeek Harness Desktop',
     icon: join(here, '..', 'assets', 'icon.png'),
-    webPreferences: { ...SECURE_WEB_PREFERENCES },
+    // Hide the menu bar: the chat UI is driven entirely by the rendered web
+    // surface, and an Electron-native menu adds nothing the user can reach.
+    // `autoHideMenuBar` is the legacy of the two for the small set of users
+    // who press Alt to reveal one; `setApplicationMenu(null)` below takes the
+    // bar out entirely.
+    autoHideMenuBar: true,
+    webPreferences: {
+      ...SECURE_WEB_PREFERENCES,
+      // Absolute path required by Electron — a relative preload silently fails
+      // to attach (and the renderer is then unable to call `shell.notify`).
+      // `here` is the directory of this `main.js` script, so the same path
+      // works in dev (`src/preload.js`) and in the packaged app (asar:src/preload.js).
+      preload: join(here, 'preload.js'),
+    },
   })
 
-  // No preload is attached on purpose. The page is a web UI whose plugin set is decided
-  // by the kernel and the user's configuration, not by this shell; with nothing bridged
-  // into it there is no shell-provided surface for it to reach through.
+  // The single Menu.setApplicationMenu call that hides the OS menu bar on
+  // every platform. Without it, Linux/Windows show File / Edit / Help above
+  // the rendered UI; macOS would still show the application menu in the menu
+  // bar even after `autoHideMenuBar: true`.
+  Menu.setApplicationMenu(null)
+
+  // The preload (`src/preload.js`) is the only piece of shell-side code the
+  // renderer can call into. Its surface is locked to `notify` and `onShown` —
+  // see `src/preload.js` for the rationale.
 
   const { webContents } = window
 
@@ -184,6 +207,27 @@ function createWindow(origin) {
     console.error(`renderer gone: ${details.reason}`)
   })
 
+  // Install the busy→idle observer every time the page finishes loading. The
+  // observer is idempotent (guards itself on `window.__DSH_SHELL_OBSERVER__`),
+  // so re-injection on SPA route changes is cheap.
+  webContents.on('did-finish-load', () => {
+    void webContents.executeJavaScript(OBSERVER_SOURCE, true).catch((error) => {
+      console.error(`observer inject failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  })
+
+  // Hide-to-tray on close: when the window is the only one, closing it should
+  // keep the kernel running invisibly. The `tray.isQuitting` flag — set by
+  // the tray's own Quit menu item and by `before-quit` below — is what lets a
+  // real quit through. Without that gate, `app.before-quit` would race the
+  // close handler and the kernel would never get a clean SIGTERM.
+  window.on('close', (event) => {
+    if (tray === null || tray.isQuitting) return
+    if (!window.isVisible()) return
+    event.preventDefault()
+    window.hide()
+  })
+
   window.once('ready-to-show', () => window.show())
   window.on('closed', () => {
     mainWindow = null
@@ -191,6 +235,20 @@ function createWindow(origin) {
 
   void window.loadURL(`${origin}/`)
   return window
+}
+
+/**
+ * Restores and focuses the main window, then tells the renderer so it can
+ * resume anything it was pausing while hidden.
+ *
+ * @returns {void}
+ */
+function showWindow() {
+  if (mainWindow === null || mainWindow.isDestroyed()) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+  mainWindow.webContents.send('shell:shown')
 }
 
 /**
@@ -224,6 +282,30 @@ if (!app.requestSingleInstanceLock()) {
     try {
       const { origin } = await startKernel()
       mainWindow = createWindow(origin)
+
+      // The IPC channel from the locked-down preload. The renderer can only
+      // call `shell.notify`; everything else in the kernel web UI has no
+      // bridge into the shell.
+      ipcMain.on('shell:notify', (_event, payload) => {
+        if (tray === null) return
+        const title = typeof payload?.title === 'string' ? payload.title : 'DeepSeek Harness'
+        const body = typeof payload?.body === 'string' ? payload.body : ''
+        tray.notify(title, body)
+      })
+
+      // Tray is attached after the window exists so its click handlers can
+      // restore it. The tray owns the "is this an explicit quit" flag the
+      // window-close handler reads.
+      tray = new ShellTray()
+      tray.attach({
+        iconPath: trayIconPath(here),
+        window: mainWindow,
+        onShow: () => showWindow(),
+        onQuit: () => {
+          tray?.prepareQuit()
+          app.quit()
+        },
+      })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
 
@@ -245,23 +327,24 @@ if (!app.requestSingleInstanceLock()) {
     }
   })
 
-  // The kernel is a child of this process. macOS would normally keep the app
-  // alive with no windows; that would leave the kernel running invisibly in
-  // the Dock. Quit on last close on every platform.
-  app.on('window-all-closed', async () => {
-    await shutdown()
-    app.quit()
+  // With a tray present, "last window closed" no longer means quit: the user
+  // hid it deliberately, and the kernel should keep running so the background
+  // task can finish. The tray's Quit menu item is the only path that calls
+  // `app.quit()` from here on.
+  app.on('window-all-closed', () => {
+    // intentional no-op on every platform with a tray
   })
 
   app.on('activate', () => {
     if (mainWindow === null || mainWindow.isDestroyed()) return
-    mainWindow.show()
-    mainWindow.focus()
+    showWindow()
   })
 
   // `before-quit` is the last point at which the kernel can still be stopped; without it a
   // quit triggered from the menu or the OS would leave the process tree running.
   app.on('before-quit', () => {
+    tray?.prepareQuit()
     void shutdown()
+    tray?.destroy()
   })
 }

@@ -18,6 +18,11 @@
  * with Node". Written inline at each `BrowserWindow` call site, one of them eventually
  * gets flipped during a debugging session and silently stays flipped.
  *
+ * `preload` is deliberately *not* in this object: Electron requires it to be an
+ * absolute path, and that path is computed in `main.js` from the location of the
+ * running script. The rest of this object is path-independent so it can be tested
+ * without spinning up a window.
+ *
  * @type {Readonly<{sandbox: boolean, contextIsolation: boolean, nodeIntegration: boolean, webviewTag: boolean, webSecurity: boolean, allowRunningInsecureContent: boolean}>}
  */
 export const SECURE_WEB_PREFERENCES = Object.freeze({
