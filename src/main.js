@@ -12,7 +12,7 @@ import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { app, BrowserWindow, dialog, shell } from 'electron'
+import { app, BrowserWindow, dialog, shell, ipcMain } from 'electron'
 import { KernelProcess, findFreePort } from './kernel-process.js'
 import { buildKernelArgs, buildKernelEnv, isSupportedNodeVersion } from './kernel-runtime.js'
 import { nodeBinaryName } from './node-runtime.js'
@@ -25,6 +25,7 @@ import {
   isAllowedNavigation,
   kernelOrigin,
 } from './window-policy.js'
+import { createTray, showTaskNotification, destroyTray } from './tray.js'
 
 const HOST = '127.0.0.1'
 const here = dirname(fileURLToPath(import.meta.url))
@@ -33,6 +34,19 @@ const here = dirname(fileURLToPath(import.meta.url))
 let kernel = null
 /** @type {BrowserWindow | null} */
 let mainWindow = null
+/**
+ * Tracks whether the user has actually chosen to quit (via menu, tray, or OS
+ * signal). `window-all-closed` also sets it so that the `close` handler below
+ * does not race against the teardown.
+ *
+ * @type {boolean}
+ */
+let isQuitting = false
+
+/** @returns {boolean} */
+function supportsBackgroundTray() {
+  return process.platform === 'win32' || process.platform === 'darwin'
+}
 
 /**
  * Where the bundled kernel lives, packaged or not.
@@ -185,6 +199,16 @@ function createWindow(origin) {
   })
 
   window.once('ready-to-show', () => window.show())
+  window.on('close', (event) => {
+    // On Windows and macOS, closing the window should send the app to the
+    // tray rather than killing the kernel underneath it. A real quit goes
+    // through `before-quit` or the tray's "Quit" item, both of which set
+    // `isQuitting` first.
+    if (!isQuitting && supportsBackgroundTray()) {
+      event.preventDefault()
+      window.hide()
+    }
+  })
   window.on('closed', () => {
     mainWindow = null
   })
@@ -224,6 +248,23 @@ if (!app.requestSingleInstanceLock()) {
     try {
       const { origin } = await startKernel()
       mainWindow = createWindow(origin)
+      if (supportsBackgroundTray()) {
+        createTray(mainWindow)
+      }
+
+      // IPC handler for renderer to notify task completion. The page has no
+      // preload bridge, so the renderer reaches Electron's IPC via `window.parent`
+      // or via a tiny `desktopBridge` injected at load time — the only path that
+      // crosses the shell boundary safely.
+      ipcMain.on('task-complete', (_event, payload) => {
+        const { title, body } = /** @type {{ title?: string, body?: string }} */ (
+          payload ?? {}
+        )
+        showTaskNotification(
+          title || 'Task Complete',
+          body || 'DeepSeek task has finished.',
+        )
+      })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
 
@@ -245,10 +286,12 @@ if (!app.requestSingleInstanceLock()) {
     }
   })
 
-  // The kernel is a child of this process. macOS would normally keep the app
-  // alive with no windows; that would leave the kernel running invisibly in
-  // the Dock. Quit on last close on every platform.
+  // The kernel is a child of this process. On Windows and macOS the window is
+  // hidden rather than destroyed, so `window-all-closed` only fires when the
+  // user has chosen to quit (or the window was never created). Quit on last
+  // close on every platform.
   app.on('window-all-closed', async () => {
+    isQuitting = true
     await shutdown()
     app.quit()
   })
@@ -262,6 +305,8 @@ if (!app.requestSingleInstanceLock()) {
   // `before-quit` is the last point at which the kernel can still be stopped; without it a
   // quit triggered from the menu or the OS would leave the process tree running.
   app.on('before-quit', () => {
+    isQuitting = true
+    destroyTray()
     void shutdown()
   })
 }

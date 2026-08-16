@@ -57,6 +57,9 @@
     "afterPack": "tools/after-pack.js",
     "win": {
       "icon": "assets/icon.ico",
+      "extraResources": [
+        "assets/icon.ico"
+      ],
       "target": [
         { "target": "nsis", "arch": ["x64"] },
         { "target": "zip", "arch": ["x64"] }
