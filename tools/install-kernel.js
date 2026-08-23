@@ -37,6 +37,18 @@ function main() {
   const { kernel } = readLock()
   const spec = `${kernel.name}@${kernel.version}`
 
+  // Skip the network round-trip if what is on disk already matches the lock. The
+  // kernel tree is several hundred packages; cold-installing it takes ~25 minutes,
+  // and `prepack:app` re-runs this script on every `dist:*` invocation. Verifying
+  // the installed manifest is cheaper than reinstalling, and is the same check the
+  // full path runs at the end.
+  if (isAlreadyInstalled(kernel)) {
+    console.log(`kernel ${kernel.version} already installed; skipping npm install`)
+    verify(kernel)
+    console.log(`kernel ${kernel.version} installed and verified`)
+    return
+  }
+
   console.log(`installing ${spec} into resources/kernel`)
 
   rmSync(kernelDir, { recursive: true, force: true })
@@ -68,6 +80,25 @@ function main() {
 
   verify(kernel)
   console.log(`kernel ${kernel.version} installed and verified`)
+}
+
+/**
+ * @param {UpstreamLock['kernel']} kernel
+ * @returns {boolean}
+ */
+function isAlreadyInstalled(kernel) {
+  const lockPath = join(kernelDir, 'package-lock.json')
+  if (!existsSync(lockPath)) return false
+  try {
+    const installed = /** @type {{packages?: Record<string, {version?: string, integrity?: string}>}} */ (
+      JSON.parse(readFileSync(lockPath, 'utf8'))
+    )
+    const entry = installed.packages?.[`node_modules/${kernel.name}`]
+    if (entry === undefined) return false
+    return entry.version === kernel.version && entry.integrity === kernel.integrity
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -117,11 +148,11 @@ function rebuildNativeModules() {
  * Swaps `node-pty` to a release that still ships `src/unix/pty.cc` and rebuilds the
  * native addon from source.
  *
- * Background: `node-pty@1.1.0` (the version `1.1.0-rc.6` of `@deepseek-ai/dsh` resolves
- * to via `^1.1.0`) ships `prebuilds/` for Windows and macOS but not Linux, and its
- * `binding.gyp` requires the now-missing `src/unix/pty.cc`. `1.1.0-beta7` predates that
- * prune and compiles cleanly on Linux x86_64 against the bundled Node; that is the only
- * thing the override is for.
+ * Background: `node-pty@1.1.0` (the version `@deepseek-ai/dsh` resolves to via `^1.1.0`
+ * through `dsh-subprocess-local`) ships `prebuilds/` for Windows and macOS but not Linux,
+ * and its `binding.gyp` requires the now-missing `src/unix/pty.cc`. `1.1.0-beta7`
+ * predates that prune and compiles cleanly on Linux x86_64 against the bundled Node; that
+ * is the only thing the override is for.
  *
  * `^1.1.0` does not by default include pre-releases, so we install the specific pinned
  * version with `--no-save`. The kernel manifest never mentions `node-pty` directly, so

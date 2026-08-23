@@ -33,6 +33,7 @@ electron-builder-cache/
 *.snap
 *.snap.*
 builder-debug.yml
+builder-effective-config.yaml
 latest-linux.yml
 latest.yml
 nsis/
@@ -46,6 +47,12 @@ scratch/
 *.tmp
 *.temp
 .cache-*
+*.tgz
+*.tar.gz
+*.zip
+*.bak
+*.orig
+*.rej
 
 # --- Environment & secrets ---
 .env
