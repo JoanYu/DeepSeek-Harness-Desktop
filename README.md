@@ -56,6 +56,35 @@ The Linux-only differences from upstream are:
 4. `package.json` `build.linux` config adds `deb` and `AppImage` targets with
    the runtime deps a Deepin installation needs.
 
+## Shipped plugins
+
+Out of the box the shell installs a small set of community plugins into every
+user's profile, so the bundled application is useful from the first launch
+rather than starting as an empty runtime. The list is pinned in
+[`upstream.lock.json#shippedPlugins`](upstream.lock.json); today:
+
+| Plugin | What it adds |
+|---|---|
+| `dshmarket` | A visual plugin market inside the kernel UI — browse, search, and one-click install community plugins, no terminal needed. |
+
+The build pipeline (`tools/install-kernel.js`) lays each shipped plugin into
+`resources/kernel/node_modules/<name>/` at install time, and the shell
+registers it into the user's profile on first launch (`src/main.js`,
+`ensureShippedPlugins`). The kernel resolves bundles from both the
+installation anchor and the user's profile, so a plugin installed at build
+time is reachable from any user without each user having to fetch it
+themselves — and once registered, the user can update or remove it from
+inside the kernel UI without touching the bundled copy.
+
+Adding a new shipped plugin is a two-step commit:
+
+1. Add the package name, version, and `sha512` integrity from npm to
+   `upstream.lock.json#shippedPlugins` so the install step verifies what
+   landed on disk.
+2. Re-run `npm run kernel:install`. The plugin is fetched alongside the
+   kernel and gets picked up on the next launch by the auto-discovery in
+   `ensureShippedPlugins` — no shell code change is required.
+
 ## Linux-only features added on top of upstream
 
 - **Hidden menu bar.** The chat UI is driven entirely by the rendered web

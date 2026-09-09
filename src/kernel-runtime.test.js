@@ -47,7 +47,14 @@ describe('isSupportedNodeVersion', () => {
 describe('buildKernelArgs', () => {
   it('puts launcher flags before app flags', () => {
     const args = buildKernelArgs({ binPath: '/k/lib/bin.js', port: 41235 })
-    assert.deepEqual(args, ['/k/lib/bin.js', '--profile', 'web', '--port', '41235'])
+    assert.deepEqual(args, [
+      '/k/lib/bin.js',
+      '--profile',
+      'web',
+      '--port',
+      '41235',
+      '--no-open',
+    ])
 
     // The launcher hands everything from the first unrecognised token onward to the app,
     // so --port must not appear before --profile.
@@ -71,6 +78,7 @@ describe('buildKernelArgs', () => {
       '/b.yml',
       '--port',
       '3080',
+      '--no-open',
     ])
     assert.ok(args.lastIndexOf('--patch') < args.indexOf('--port'))
   })
@@ -84,6 +92,13 @@ describe('buildKernelArgs', () => {
     assert.equal(args[1], '--profile')
     assert.equal(args[2], 'web')
     assert.equal(args.indexOf('web'), 2, 'the alias must not appear anywhere else')
+  })
+
+  it('tells the web app not to hand its URL to the OS default browser', () => {
+    // The shell shows the UI in its own window; the kernel handing the URL to a
+    // second browser would be a duplicate view the user never asked for.
+    const args = buildKernelArgs({ binPath: '/k/lib/bin.js', port: 3080 })
+    assert.ok(args.includes('--no-open'), '--no-open must be in the arg vector')
   })
 
   it('refuses a port that is not a usable TCP port', () => {

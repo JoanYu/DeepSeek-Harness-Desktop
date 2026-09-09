@@ -25,5 +25,13 @@
       "archive": "node-v22.22.0-linux-x64.tar.gz",
       "sha256": "c33c39ed9c80deddde77c960d00119918b9e352426fd604ba41638d6526a4744"
     }
+  },
+  "shippedPlugins": {
+    "$comment": "Plugins installed into resources/kernel/node_modules/ at build time and registered into the user's profile on first launch. The kernel resolves bundles from either the install anchor (this directory) or the profile's node_modules, so the bundled copy is reachable from any user. integrity is the npm sha512 — install-kernel.js verifies it against package-lock.json, same as the kernel entry.",
+    "dshmarket": {
+      "version": "1.20.0",
+      "integrity": "sha512-JqbUuNpiOwYELMIqSs+zufFq3FxK7rA3SCoqpMfnHMajM0xO//aWhQEBKfrk8+k3uw6HTUlHSfufDH3m+Np21A==",
+      "description": "Visual plugin market inside DeepSeek Harness — browse, search, one-click install community plugins"
+    }
   }
 }

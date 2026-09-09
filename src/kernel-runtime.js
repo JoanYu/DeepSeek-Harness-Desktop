@@ -87,11 +87,18 @@ export function isSupportedNodeVersion(version) {
  *
  * Ordering is not cosmetic. The launcher parses only its own flags and hands the first
  * token it does not recognise, plus everything after it, to the booted app — so launcher
- * flags come first and `--port` (owned by the web app) comes last.
+ * flags come first and web-app flags (`--port`, `--no-open`) come last.
  *
  * `--profile web` is used rather than the shorter `web` alias: the alias is a Commander
  * subcommand and rejects launcher flags that appear before it, which makes flag order a
  * silent tripwire. The long form has no such ambiguity.
+ *
+ * `--no-open` is a web-app flag, parsed by `@deepseek-ai/dsh-web-app` (see its
+ * `startup.js`). Without it the web app hands the URL to the operating system's
+ * default browser on startup — the kernel's way of working when the user runs
+ * `dsh` from a terminal. The shell already shows the UI in its own window, so a
+ * second browser opening is a duplicate; the desktop surface is always the
+ * canonical view here.
  *
  * @param {object} options
  * @param {string} options.binPath - absolute path to the kernel's `lib/bin.js`
@@ -111,6 +118,7 @@ export function buildKernelArgs({ binPath, port, patchFiles = [] }) {
     ...patchFiles.flatMap((file) => ['--patch', file]),
     '--port',
     String(port),
+    '--no-open',
   ]
 }
 
