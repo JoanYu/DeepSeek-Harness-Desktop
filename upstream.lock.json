@@ -2,8 +2,8 @@
   "$comment": "The single source of truth for which kernel this shell bundles. Upstream is a developer preview that documents breaking changes between releases, so upgrading is an explicit commit — never something a rebuild does on its own. Do not repeat these values anywhere else; a second copy stays self-consistent right up until someone changes only one of them.",
   "kernel": {
     "name": "@deepseek-ai/dsh",
-    "version": "0.1.0-rc.6",
-    "integrity": "sha512-brpZfED7ieRa2PQ5tUxMhHrM1pb2CmKFVM/f6yMULBDMicahk+Z2OsHgTwTDnoiZm23Ftu9rQz0NN4pflaoJcg==",
+    "version": "0.1.2-rc.1",
+    "integrity": "sha512-RPq48TzxvwpdT9/7W1tbhZDBMmeK+bxDrX9cqQC27Wx/LqtgJF8PSa3b3xriU8oxtvhwYmk21w2cej3uMQrnVA==",
     "bin": "node_modules/@deepseek-ai/dsh/lib/bin.js"
   },
   "nodeRuntime": {
