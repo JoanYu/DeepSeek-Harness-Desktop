@@ -82,6 +82,10 @@ export class KernelProcess {
   #exitCode = null
   /** @type {Array<(info: {code: number | null, signal: string | null}) => void>} */
   #exitListeners = []
+  /** @type {string | null} */
+  #readyUrl = null
+  /** @type {Array<(url: string) => void>} */
+  #readyUrlListeners = []
   #stopping = false
 
   /** @param {number} [logLimit] */
@@ -135,9 +139,96 @@ export class KernelProcess {
     })
 
     child.stdout?.setEncoding('utf8')
-    child.stdout?.on('data', (chunk) => this.#log.push(String(chunk)))
+    child.stdout?.on('data', (chunk) => {
+      const text = String(chunk)
+      this.#log.push(text)
+      this.#absorbReadyUrl(text)
+    })
     child.stderr?.setEncoding('utf8')
     child.stderr?.on('data', (chunk) => this.#log.push(String(chunk)))
+  }
+
+  /**
+   * Waits until the kernel prints its authenticated launch URL on stdout, then resolves with
+   * that URL. Resolves to null if the kernel exits first or the timeout elapses — neither
+   * is fatal; the caller treats null as "no token was issued" and proceeds with the bare
+   * origin.
+   *
+   * The kernel's web-app plugin announces its URL via `console.log(\`dsh web: <url>\`)`
+   * exactly once per process; the token in the query string is the credential every
+   * subsequent request must carry, because the kernel's `authorizeIndex` handler returns
+   * 401 to anything without it (see dsh-client-connection). A shell that probed `/` and
+   * loaded the URL without the token would see a 401 on the first request and never get
+   * past the cookie-mint handshake.
+   *
+   * @param {number} [timeoutMs]
+   * @returns {Promise<string | null>} the URL the kernel printed, or null on timeout/exit
+   */
+  awaitReadyUrl(timeoutMs = 90_000) {
+    if (this.#readyUrl !== null) return Promise.resolve(this.#readyUrl)
+    if (this.#exited) return Promise.resolve(null)
+    return new Promise((resolve) => {
+      /** @param {string | null} value */
+      const settle = (value) => {
+        clearTimeout(timer)
+        this.#offReadyUrl(settle)
+        this.#offExit(settleExit)
+        resolve(value)
+      }
+      const timer = setTimeout(() => settle(null), timeoutMs)
+      const settleExit = () => settle(null)
+      this.#onReadyUrl(settle)
+      this.#onExit(settleExit)
+    })
+  }
+
+  /**
+   * Scans a stdout chunk for the kernel's `dsh web: <url>` announcement and stashes the
+   * URL the first time it appears. Anything that does not match the announcement is
+   * left for the log buffer.
+   *
+   * @param {string} text
+   */
+  #absorbReadyUrl(text) {
+    if (this.#readyUrl !== null) return
+    const match = /dsh web: (\S+)/.exec(text)
+    if (match === null || match[1] === undefined) return
+    this.#readyUrl = match[1]
+    for (const listener of this.#readyUrlListeners) listener(this.#readyUrl)
+  }
+
+  /**
+   * @param {(url: string) => void} listener
+   */
+  #onReadyUrl(listener) {
+    this.#readyUrlListeners.push(listener)
+  }
+
+  /** @param {(url: string) => void} listener */
+  #offReadyUrl(listener) {
+    const idx = this.#readyUrlListeners.indexOf(listener)
+    if (idx !== -1) this.#readyUrlListeners.splice(idx, 1)
+  }
+
+  /** @param {() => void} listener */
+  #onExit(listener) {
+    this.#exitListeners.push(listener)
+  }
+
+  /** @param {() => void} listener */
+  #offExit(listener) {
+    const idx = this.#exitListeners.indexOf(listener)
+    if (idx !== -1) this.#exitListeners.splice(idx, 1)
+  }
+
+  /**
+   * Whether the kernel has already announced its authenticated URL. Lets the caller
+   * skip the wait when the announcement arrived before the listener was attached.
+   *
+   * @returns {string | null}
+   */
+  get readyUrl() {
+    return this.#readyUrl
   }
 
   /** @returns {boolean} whether this launch is still alive */

@@ -225,7 +225,7 @@ async function ensureShippedPlugins(dshHome, shippedRoot) {
 /**
  * Starts the kernel and waits until it is genuinely serving.
  *
- * @returns {Promise<{origin: string}>}
+ * @returns {Promise<{origin: string, readyUrl: string | null}>}
  * @throws when the kernel cannot be started or never becomes ready
  */
 async function startKernel() {
@@ -293,8 +293,18 @@ async function startKernel() {
   })
 
   const origin = kernelOrigin(HOST, port)
+
+  // The kernel mints a per-launch token and gates `/` on it (`authorizeIndex` in
+  // dsh-client-connection returns 401 to anything without the query-string credential).
+  // Wait for the kernel to print its `dsh web: <url>?token=...` announcement, then
+  // pass the full URL to the probe and to the BrowserWindow so the cookie-mint
+  // handshake completes. Probing the bare origin first just gets 401s until the
+  // announcement arrives, and the readiness timeout would fire long before then.
+  const readyUrl = await process_.awaitReadyUrl()
+  const probeUrl = readyUrl ?? `${origin}/`
+
   const readiness = await waitForReady({
-    url: `${origin}/`,
+    url: probeUrl,
     isCurrent: () => process_.isRunning(),
     probe: httpProbe,
   })
@@ -307,14 +317,15 @@ async function startKernel() {
     throw new Error(`${why}\n\nRecent output:\n${tail(process_.logText(), 25)}`)
   }
 
-  return { origin }
+  return { origin, readyUrl }
 }
 
 /**
  * @param {string} origin
+ * @param {string | null} readyUrl - the tokenized URL the kernel announced, if any
  * @returns {BrowserWindow}
  */
-function createWindow(origin) {
+function createWindow(origin, readyUrl) {
   const window = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -371,7 +382,7 @@ function createWindow(origin) {
     mainWindow = null
   })
 
-  void window.loadURL(`${origin}/`)
+  void window.loadURL(readyUrl ?? `${origin}/`)
   return window
 }
 
@@ -404,8 +415,8 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     try {
-      const { origin } = await startKernel()
-      mainWindow = createWindow(origin)
+      const { origin, readyUrl } = await startKernel()
+      mainWindow = createWindow(origin, readyUrl)
       if (supportsBackgroundTray()) {
         createTray(mainWindow)
       }
