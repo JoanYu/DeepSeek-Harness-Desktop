@@ -18,7 +18,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -53,7 +53,18 @@ function main() {
 
   console.log(`installing ${spec} into resources/kernel`)
 
-  rmSync(kernelDir, { recursive: true, force: true })
+  // Best-effort clean. A Windows handle leak (antivirus, Explorer thumbnail
+  // cache) can refuse to unlink the directory even when it is empty; in that
+  // case the `npm install` below will overwrite in place, which is fine for
+  // this script's purposes — the manifest rewrite at the end will reflect the
+  // fresh install regardless of what survived.
+  try {
+    if (readdirSync(kernelDir).length > 0) {
+      rmSync(kernelDir, { recursive: true, force: true })
+    }
+  } catch (error) {
+    console.warn(`could not clean ${kernelDir} (${error instanceof Error ? error.message : String(error)}); installing in place`)
+  }
   mkdirSync(kernelDir, { recursive: true })
 
   // A private, versionless manifest: this directory is a payload, not a package, and
@@ -306,48 +317,9 @@ const SHIPPED_PLUGIN_PATCHES = /** @type {const} */ ([
     // (already `[nodeBinDir, ...extraPathDirs]`) is left alone — `nodeBinDir`
     // is the bundled Node shipped under `resources/kernel/`, so on Windows a
     // packaged install always finds npm/corepack next to the running binary.
-    find: `function spawnEnv() {
-    // pnpm v10+ blocks forever on a silent interactive prompt without a TTY;
-    // CI mode forces it to act or fail instead of asking.
-    const separator = process.platform === 'win32' ? ';' : ':';
-    const parts = (process.env.PATH ?? '').split(separator).filter(part => part !== '');
-    const candidates = process.platform === 'win32'
-        ? [nodeBinDir, ...extraPathDirs]
-        : ['/opt/homebrew/bin', '/usr/local/bin', join(homedir(), '.local', 'bin'), nodeBinDir, ...extraPathDirs];`,
-    replace: `function spawnEnv() {
-    // pnpm v10+ blocks forever on a silent interactive prompt without a TTY;
-    // CI mode forces it to act or fail instead of asking.
-    const separator = process.platform === 'win32' ? ';' : ':';
-    const parts = (process.env.PATH ?? '').split(separator).filter(part => part !== '');
-    const candidates = process.platform === 'win32'
-        ? [nodeBinDir, ...extraPathDirs]
-        : [
-            '/opt/homebrew/bin',
-            '/usr/local/bin',
-            join(homedir(), '.local', 'bin'),
-            ...nodeVersionManagerBins(),
-            nodeBinDir,
-            ...extraPathDirs,
-        ];
-    for (const bin of candidates) {
-        if (!parts.includes(bin))
-            parts.push(bin);
-    }
-    return { ...process.env, ...proxyEnvForPnpm(process.env, activeRegion()), CI: 'true', PATH: parts.join(separator) };
-}
-/**
- * \`bin\` directories the Node version managers (nvm, fnm) install their shims
- * under. A desktop launch never inherits the shell function that adds them to
- * PATH, so the static candidate list above is blind to them — npm and corepack
- * then look like "not found" even though they are sitting one directory away
- * from a node the user uses every day (#patch-node-version-managers).
- *
- * Each entry is appended only when the parent directory actually exists, so a
- * missing toolchain adds no junk to PATH. Globbing is avoided because the
- * version subdirectories are stable per install and a single walk at probe
- * time costs a \`readdirSync\` we already pay when scanning PATH anyway.
- */
-function nodeVersionManagerBins() {
+    find: `['/opt/homebrew/bin', '/usr/local/bin', join(homedir(), '.local', 'bin'), nodeBinDir, ...extraPathDirs];`,
+    replace: `['/opt/homebrew/bin', '/usr/local/bin', join(homedir(), '.local', 'bin'), ...nodeVersionManagerBins(), nodeBinDir, ...extraPathDirs];`,
+    appendAfter: `function nodeVersionManagerBins() {
     const home = homedir();
     /** @type {string[]} */
     const bins = [];
@@ -378,6 +350,7 @@ function nodeVersionManagerBins() {
  *   file: string,
  *   find: string,
  *   replace: string,
+ *   appendAfter?: string,
  * }} ShippedPluginPatch
  */
 
@@ -388,6 +361,10 @@ function nodeVersionManagerBins() {
  * place). A `find` that does not match the upstream source AND is not the
  * patched variant is a build error: a new plugin release has broken our
  * patch, and shipping a half-patched plugin would be worse than failing.
+ *
+ * When `appendAfter` is set, the given string is inserted immediately after
+ * the patched `replace` block. Use it for a helper function the patched code
+ * now references but the upstream source does not define.
  */
 function patchShippedPlugins() {
   for (const patch of SHIPPED_PLUGIN_PATCHES) {
@@ -413,7 +390,10 @@ function patchShippedPlugins() {
       )
     }
 
-    const patched = original.replace(patch.find, patch.replace)
+    let patched = original.replace(patch.find, patch.replace)
+    if (patch.appendAfter !== undefined && !patched.includes(patch.appendAfter)) {
+      patched = patched.replace(patch.replace, `${patch.replace}\n${patch.appendAfter}`)
+    }
     writeFileSync(target, patched, 'utf8')
     console.log(`shipped plugin ${patch.plugin}: patched ${patch.file}`)
   }
