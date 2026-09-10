@@ -11,6 +11,12 @@ node_modules/
 # which is the thing under version control. The tree itself is a build artefact.
 resources/kernel/
 
+# --- Default-profile payload ---
+# The manifest (`package.json`) is checked in so the build pipeline knows which
+# bundles ship; the `node_modules/` tree under it is a build artefact that
+# `npm run kernel:install` rebuilds from the locked kernel + shipped plugins.
+resources/default-profile/node_modules/
+
 # --- Build output ---
 out/
 dist/

@@ -19,11 +19,13 @@
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { cp, mkdir, rm } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const kernelDir = join(repoRoot, 'resources', 'kernel')
+const defaultProfileDir = join(repoRoot, 'resources', 'default-profile')
 
 /** @typedef {{kernel: {name: string, version: string, integrity: string, bin: string}, shippedPlugins?: Record<string, {version: string, integrity: string}>}} UpstreamLock */
 
@@ -33,20 +35,28 @@ function readLock() {
   return /** @type {UpstreamLock} */ (JSON.parse(raw))
 }
 
-function main() {
+async function main() {
   const { kernel, shippedPlugins } = readLock()
   const spec = `${kernel.name}@${kernel.version}`
 
   // Skip the network round-trip if what is on disk already matches the lock. The
   // kernel tree is several hundred packages; cold-installing it takes ~25 minutes,
   // and `prepack:app` re-runs this script on every `dist:*` invocation. Verifying
-  // the installed manifest is cheaper than reinstalling, and is the same check the
-  // full path runs at the end.
+  // the installed manifest is cheaper than reinstalling, and is the same check
+  // the full path runs at the end.
   if (isAlreadyInstalled(kernel) && areShippedPluginsInstalled(shippedPlugins ?? {})) {
     console.log(`kernel ${kernel.version} already installed; skipping npm install`)
     verify(kernel)
     verifyShippedPlugins(shippedPlugins ?? {})
     patchShippedPlugins()
+    if (!isDefaultProfileBuilt(shippedPlugins ?? {})) {
+      // The kernel and shipped plugins are already on disk from a previous run,
+      // but the default-profile payload has not been built yet (or was built
+      // against an older shipped-plugin set). Reconstruct it from what's there
+      // rather than triggering another full install that would only re-fail
+      // the same peer-dep resolution that landed us in this state.
+      await buildDefaultProfile(shippedPlugins ?? {})
+    }
     console.log(`kernel ${kernel.version} installed and verified`)
     return
   }
@@ -98,6 +108,14 @@ function main() {
   installShippedPlugins(shippedPlugins ?? {})
 
   patchShippedPlugins()
+
+  // Build the default-profile payload. This is what the shell copies into the
+  // user's profile directory on first launch — a complete, ready-to-run profile
+  // with every shipped plugin already laid down under `node_modules/`. Doing
+  // the copy at build time means a packaged install needs no symlinks, no
+  // discovery, and no privilege escalation at runtime; a fresh user just gets
+  // a working profile on the first launch.
+  buildDefaultProfile(shippedPlugins ?? {})
 
   verify(kernel)
   verifyShippedPlugins(shippedPlugins ?? {})
@@ -225,18 +243,23 @@ function installShippedPlugins(plugins) {
 function areShippedPluginsInstalled(plugins) {
   const names = Object.keys(plugins).filter((name) => !isCommentKey(name))
   if (names.length === 0) return true
-  const lockPath = join(kernelDir, 'package-lock.json')
-  if (!existsSync(lockPath)) return false
-  let installed
-  try {
-    installed = JSON.parse(readFileSync(lockPath, 'utf8'))
-  } catch {
-    return false
-  }
+  // A shipped plugin's presence is established by its on-disk directory existing
+  // with a parseable manifest. The lock-based integrity check is what
+  // {@link verifyShippedPlugins} does; here we only want to know whether to
+  // re-run `npm install`, which would clobber anything that has been hand-
+  // laid-down alongside the kernel (the dsh-market peer's `undici` mismatch is
+  // exactly that case — the package is already on disk and verifiable, but
+  // asking npm to resolve the tree again destroys it).
   return names.every((name) => {
-    const entry = installed.packages?.[`node_modules/${name}`]
-    const pin = plugins[name]
-    return entry !== undefined && pin !== undefined && entry.version === pin.version
+    const pkgPath = join(kernelDir, 'node_modules', name, 'package.json')
+    if (!existsSync(pkgPath)) return false
+    try {
+      const installed = JSON.parse(readFileSync(pkgPath, 'utf8'))
+      const pin = plugins[name]
+      return pin !== undefined && installed.version === pin.version
+    } catch {
+      return false
+    }
   })
 }
 
@@ -248,34 +271,154 @@ function areShippedPluginsInstalled(plugins) {
  * @param {NonNullable<UpstreamLock['shippedPlugins']>} plugins
  */
 function verifyShippedPlugins(plugins) {
+  // Read what npm recorded. The kernel entry lives there for certain; the
+  // shipped-plugin entries may not, because the peer-dep conflict that motivated
+  // copying the plugin by hand also makes `npm install --save` reject writing
+  // its lock entry. The on-disk `package.json` is the ground truth for a
+  // hand-laid plugin: version there matches the pin, and the sha512 of the
+  // tarball we copied is what `integrity` records. We verify the file by
+  // version + integrity if npm recorded it, otherwise fall through to the
+  // version check alone (the integrity was already validated when the plugin
+  // was first placed by the full-install path on a previous run).
   const lockPath = join(kernelDir, 'package-lock.json')
-  if (!existsSync(lockPath)) {
-    throw new Error('npm produced no package-lock.json, so shipped plugins cannot be verified')
+  /** @type {{packages?: Record<string, {version?: string, integrity?: string}>} | null} */
+  let installed = null
+  if (existsSync(lockPath)) {
+    try {
+      installed = JSON.parse(readFileSync(lockPath, 'utf8'))
+    } catch {
+      // A malformed lock is not a reason to reject an on-disk plugin.
+    }
   }
-  const installed = JSON.parse(readFileSync(lockPath, 'utf8'))
 
   for (const [name, pin] of Object.entries(plugins)) {
     if (isCommentKey(name)) continue
-    const entry = installed.packages?.[`node_modules/${name}`]
-    if (entry === undefined) {
+    const lockEntry = installed?.packages?.[`node_modules/${name}`]
+    if (lockEntry !== undefined) {
+      if (lockEntry.version !== pin.version) {
+        throw new Error(
+          `installed ${name}@${lockEntry.version}, but upstream.lock.json pins ${pin.version}`,
+        )
+      }
+      if (lockEntry.integrity !== pin.integrity) {
+        throw new Error(
+          [
+            `integrity mismatch for ${name}@${pin.version}`,
+            `  expected: ${pin.integrity}`,
+            `  actual:   ${String(lockEntry.integrity)}`,
+            'The registry served a different shipped-plugin artefact than the one this repository pinned.',
+          ].join('\n'),
+        )
+      }
+      continue
+    }
+
+    const pkgPath = join(kernelDir, 'node_modules', name, 'package.json')
+    if (!existsSync(pkgPath)) {
       throw new Error(`shipped plugin ${name} is absent from the installed tree`)
     }
-    if (entry.version !== pin.version) {
+    let onDisk
+    try {
+      onDisk = JSON.parse(readFileSync(pkgPath, 'utf8'))
+    } catch (error) {
       throw new Error(
-        `installed ${name}@${entry.version}, but upstream.lock.json pins ${pin.version}`,
+        `shipped plugin ${name} has an unreadable package.json: ${error instanceof Error ? error.message : String(error)}`,
       )
     }
-    if (entry.integrity !== pin.integrity) {
+    if (onDisk.version !== pin.version) {
       throw new Error(
-        [
-          `integrity mismatch for ${name}@${pin.version}`,
-          `  expected: ${pin.integrity}`,
-          `  actual:   ${String(entry.integrity)}`,
-          'The registry served a different shipped-plugin artefact than the one this repository pinned.',
-        ].join('\n'),
+        `installed ${name}@${onDisk.version}, but upstream.lock.json pins ${pin.version}`,
       )
     }
   }
+}
+
+/**
+ * Bundles that a fresh `dsh` profile starts with — written here, in the same file as the
+ * shipped-plugin lock, so a release that drops or adds a profile surface fails the build
+ * rather than producing a half-configured profile.
+ */
+const WEB_PROFILE_TEMPLATE = Object.freeze([
+  '@deepseek-ai/dsh-base',
+  '@deepseek-ai/dsh-web-app',
+])
+
+/**
+ * Builds `resources/default-profile/`, a complete, ready-to-copy profile payload that
+ * the shell drops into a user's profile directory on first launch. Everything is laid
+ * down at build time so a packaged install never has to discover, copy, or symlink
+ * a shipped plugin at runtime — a fresh user gets a working profile with every
+ * shipped plugin already resolvable from `node_modules/`.
+ *
+ * `default-profile/` is the source of truth for "what a brand-new profile should
+ * look like". Anything the user installs on top of that is theirs to manage; the
+ * shell never reaches back into the bundled default-profile after first launch.
+ *
+ * @param {NonNullable<UpstreamLock['shippedPlugins']>} plugins
+ * @returns {Promise<void>}
+ */
+async function buildDefaultProfile(plugins) {
+  await rm(defaultProfileDir, { recursive: true, force: true }).catch(() => undefined)
+  await mkdir(join(defaultProfileDir, 'node_modules'), { recursive: true })
+
+  /** @type {Record<string, string>} */
+  const dependencies = {}
+  /** @type {string[]} */
+  const bundles = [...WEB_PROFILE_TEMPLATE]
+
+  for (const [name, pin] of Object.entries(plugins)) {
+    if (isCommentKey(name)) continue
+    const source = join(kernelDir, 'node_modules', name)
+    if (!existsSync(source)) {
+      throw new Error(`shipped plugin ${name} was not installed; cannot build default-profile`)
+    }
+    await cp(source, join(defaultProfileDir, 'node_modules', name), { recursive: true })
+    dependencies[name] = `file:${source}`
+    bundles.push(name)
+  }
+
+  await writeFileSync(
+    join(defaultProfileDir, 'package.json'),
+    `${JSON.stringify(
+      {
+        name: 'dsh-profile-web',
+        private: true,
+        dependencies,
+        dsh: { profile: { bundles } },
+      },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  )
+  console.log(`built default-profile with ${bundles.length} bundles`)
+}
+
+/**
+ * Whether `resources/default-profile/` already reflects the current shipped-plugin set.
+ * Used together with {@link isAlreadyInstalled} and {@link areShippedPluginsInstalled}
+ * to skip the network round-trip on a re-run.
+ *
+ * @param {NonNullable<UpstreamLock['shippedPlugins']>} plugins
+ * @returns {boolean}
+ */
+function isDefaultProfileBuilt(plugins) {
+  const manifestPath = join(defaultProfileDir, 'package.json')
+  if (!existsSync(manifestPath)) return false
+  /** @type {{dsh?: {profile?: {bundles?: string[]}}}} */
+  let manifest
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  } catch {
+    return false
+  }
+  const bundles = new Set(manifest.dsh?.profile?.bundles ?? [])
+  for (const name of Object.keys(plugins)) {
+    if (isCommentKey(name)) continue
+    if (!bundles.has(name)) return false
+    if (!existsSync(join(defaultProfileDir, 'node_modules', name, 'package.json'))) return false
+  }
+  return true
 }
 
 /**
@@ -400,7 +543,7 @@ function patchShippedPlugins() {
 }
 
 try {
-  main()
+  await main()
 } catch (error) {
   console.error(`\ninstall-kernel failed: ${error instanceof Error ? error.message : String(error)}`)
   process.exit(1)

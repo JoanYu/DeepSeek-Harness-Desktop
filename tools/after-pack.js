@@ -17,6 +17,7 @@
  */
 
 import { cp, readdir, rm, stat } from 'node:fs/promises'
+import { existsSync as existsSyncSync } from 'node:fs'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -70,6 +71,24 @@ export default async function afterPack(context) {
   }
 
   console.log('  • kernel copied and verified')
+
+  // The default-profile payload is the seed the shell copies into a fresh user's
+  // profile on first launch. It is laid down at build time so end users get a
+  // working bundled plugin (dsh-market) without any per-user setup, regardless
+  // of whether the developer ever ran the app locally. We copy it through here
+  // for the same reason the kernel is: electron-builder's `extraResources` runs
+  // its own dependency-tree logic over `node_modules` directories and silently
+  // produces an empty payload for them, which surfaces only as a missing plugin
+  // on first launch.
+  const defaultProfileSource = join(repoRoot, 'resources', 'default-profile')
+  if (existsSyncSync(defaultProfileSource)) {
+    const defaultProfileDest = join(resourcesDir, 'default-profile')
+    console.log(`  • copying default-profile from=${defaultProfileSource} to=${defaultProfileDest}`)
+    await cp(defaultProfileSource, defaultProfileDest, { recursive: true, force: true })
+    const seedManifest = join(defaultProfileDest, 'package.json')
+    await assertPresent(seedManifest, `the default-profile seed manifest is missing from the package at ${seedManifest}`)
+    console.log('  • default-profile copied and verified')
+  }
 
   await pruneLocales(isMac ? join(resourcesDir, '..', 'Resources') : context.appOutDir)
 }

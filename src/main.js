@@ -8,8 +8,8 @@
  * @module main
  */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { mkdir, symlink, writeFile } from 'node:fs/promises'
+import { existsSync, readFileSync } from 'node:fs'
+import { cp, mkdir, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { app, BrowserWindow, dialog, shell, ipcMain } from 'electron'
@@ -75,151 +75,56 @@ function resolveKernelPaths() {
 }
 
 /**
- * Walks the bundled `node_modules/` and returns every package that declares
- * itself as a dsh bundle (i.e. has a `dsh.bundle.patch` in its package.json) —
- * skipping the kernel's own `@deepseek-ai/*` packages, which the profile template
- * already covers.
+ * Where the bundled default-profile payload lives, packaged or not.
  *
- * Used to discover shipped plugins at runtime: any package laid down under
- * `resources/kernel/node_modules/` by the build pipeline that ships a patch
- * layer gets picked up automatically, with no separate manifest to keep in sync.
+ * Like the kernel, default-profile sits in `extraResources` rather than the asar —
+ * the shell reads it directly with `node:fs`, and an asar file would require an
+ * unpack step before the copy.
  *
- * @param {string} nodeModulesRoot - absolute path of the bundled `node_modules/`
- * @returns {string[]} package names, in `node_modules/` directory order
+ * @returns {string}
  */
-function discoverShippedPlugins(nodeModulesRoot) {
-  if (!existsSync(nodeModulesRoot)) return []
-  /** @type {string[]} */
-  const shipped = []
-  for (const entry of readdirSync(nodeModulesRoot)) {
-    if (entry.startsWith('.')) continue
-    if (entry.startsWith('@deepseek-ai/')) continue
-    const pkgPath = join(nodeModulesRoot, entry, 'package.json')
-    if (!existsSync(pkgPath)) continue
-    try {
-      const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
-      if (pkg.dsh?.bundle?.patch !== undefined) shipped.push(entry)
-    } catch {
-      // An unreadable bundled package is a build error; surface it but do not
-      // refuse to start the kernel over a missing optional plugin.
-    }
-  }
-  return shipped
+function resolveDefaultProfilePath() {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'default-profile')
+    : join(here, '..', 'resources', 'default-profile')
 }
 
 /**
- * Registers every shipped plugin into the user's profile manifest, so the kernel
- * loads it on boot the same way it would load a plugin the user installed
- * themselves.
+ * Seeds a fresh user's profile from the bundled default-profile payload.
  *
- * Why this is necessary: the kernel only loads packages listed in the profile's
- * `dsh.profile.bundles`. A plugin shipped alongside the kernel (laid down at build
- * time under `resources/kernel/node_modules/<plugin>/`) is reachable through the
- * install anchor when `resolveBundleDir` is asked for it — but it is not on the
- * bundle list until something puts it there. `dsh plugin --profile web add <path>`
- * would do this through pnpm, which would require pnpm to be on PATH on every
- * install. Editing the profile manifest directly avoids the pnpm dependency and
- * keeps the shipped copy where it already is: the user gets the same registry
- * entry as if they had installed it themselves, and `dsh plugin` later (which
- * pnpm does power) sees it as a regular dependency and leaves it alone.
+ * The shell does not discover, copy, or symlink plugins at runtime: every shipped
+ * plugin is laid down at build time under `resources/default-profile/` (a complete,
+ * ready-to-use profile tree), and the shell's only job on first launch is to copy
+ * that tree into the user's profile directory. Anything the user installs on top
+ * of that is theirs to manage — the shell never reaches back into the bundled
+ * default-profile after this point.
  *
- * A second step is required because of how the kernel loads bundles: an entry
- * declared in a bundle's patch file is activated by `tree.import(<name>)` from
- * inside the profile directory, and Node's ESM resolution from there walks
- * `node_modules/` looking for `<name>`. The shipped copy sits in the kernel's
- * tree, not in the user's profile, so we symlink each shipped plugin into the
- * profile's `node_modules/` to make the dynamic import succeed without requiring
- * pnpm to be on PATH.
- *
- * Idempotent: a profile that already lists every shipped plugin is left untouched
- * (the bundle list check is the source of truth); the symlink is also a no-op when
- * it already points at the same target.
- *
- * A failure here is logged but does not abort startup — the user gets a working
- * shell, just without the shipped plugins.
+ * What counts as "fresh": the user-profile directory does not yet exist. That is
+ * the marker the kernel uses to know it should run its own template seed, and is
+ * the only state where copying the default-profile is unambiguously correct. An
+ * existing profile (even one that is empty or broken) belongs to the user; we
+ * touch it no further than necessary to launch the kernel, and we deliberately
+ * avoid the previous behaviour of rewriting the user's manifest to add entries
+ * the user did not ask for.
  *
  * @param {string} dshHome - this app's private kernel home
- * @param {string} shippedRoot - the directory of the bundled `node_modules/`
  * @returns {Promise<void>}
  */
-async function ensureShippedPlugins(dshHome, shippedRoot) {
-  const shippedNames = discoverShippedPlugins(shippedRoot)
-  if (shippedNames.length === 0) return
-
+async function seedDefaultProfile(dshHome) {
   const profileDir = join(dshHome, 'profiles', 'web')
-  const profileNodeModules = join(profileDir, 'node_modules')
-  const manifestPath = join(profileDir, 'package.json')
+  if (existsSync(profileDir)) return
 
-  let existing = /** @type {{dependencies?: Record<string, string>, dsh?: {profile?: {bundles?: string[]}}} | null} */ (null)
-  if (existsSync(manifestPath)) {
-    try {
-      existing = JSON.parse(readFileSync(manifestPath, 'utf8'))
-    } catch (error) {
-      // A corrupt profile manifest is exactly what we are trying to amend — fall
-      // through and rebuild the shape around the existing file rather than refusing
-      // to start the kernel over a missing bundle.
-      console.warn(`shipped plugins: existing profile manifest could not be parsed (${error instanceof Error ? error.message : String(error)}); rewriting`)
-    }
+  const defaultProfileDir = resolveDefaultProfilePath()
+  if (!existsSync(join(defaultProfileDir, 'package.json'))) {
+    // No default-profile bundled means this build is intentionally plugin-free;
+    // let the kernel run its own template seed.
+    return
   }
 
-  const registeredBundles = new Set(existing?.dsh?.profile?.bundles ?? [])
-  const missing = shippedNames.filter((name) => !registeredBundles.has(name))
-
-  // Always ensure the symlinks, even on a re-run after the bundle list is already
-  // up to date. A first launch that ran an earlier (no-symlink) version of this
-  // step left the bundles registered but no profile-side link, which means a
-  // later dynamic `import 'dshmarket'` from inside the profile still cannot
-  // resolve the package.
-  await mkdir(profileNodeModules, { recursive: true })
-  const relinked = []
-  for (const name of shippedNames) {
-    const source = join(shippedRoot, name)
-    const link = join(profileNodeModules, name)
-    if (!existsSync(link)) {
-      await mkdir(dirname(link), { recursive: true })
-      await symlink(source, link, 'dir')
-      relinked.push(name)
-    }
-  }
-  if (relinked.length > 0) {
-    console.log(`shipped plugins: linked ${relinked.join(', ')} into ${profileNodeModules}`)
-  }
-
-  if (missing.length === 0 && existing !== null) return
-
-  // The bundles a fresh `dsh` profile starts with. Mirrors the template the
-  // kernel's own `initProfile` would have written had it run first — and it
-  // must, because this bootstrap runs before the kernel boots, so the kernel
-  // sees the manifest as already initialised and skips its own template seed.
-  // A profile that lists `dshmarket` but no `dsh-web-app` would boot the kernel
-  // with no web surface at all.
-  const WEB_PROFILE_TEMPLATE = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
-
-  // `dependencies` and `bundles` both need the shipped name. `bundles` is what
-  // `loadProfile` walks to resolve and activate a layer; `dependencies` is what
-  // `dsh plugin` later reads to decide whether a package is still installed
-  // (without an entry here, a future reconciliation would prune the bundle).
-  const manifest = existing ?? {
-    name: 'dsh-profile-web',
-    private: true,
-    dependencies: /** @type {Record<string, string>} */ ({}),
-    dsh: { profile: { bundles: [...WEB_PROFILE_TEMPLATE] } },
-  }
-  manifest.dependencies = manifest.dependencies ?? /** @type {Record<string, string>} */ ({})
-  manifest.dsh = manifest.dsh ?? {}
-  manifest.dsh.profile = manifest.dsh.profile ?? {}
-  manifest.dsh.profile.bundles = manifest.dsh.profile.bundles ?? [...WEB_PROFILE_TEMPLATE]
-
-  for (const name of missing) {
-    const source = join(shippedRoot, name)
-    manifest.dependencies[name] = `file:${source}`
-    if (!manifest.dsh.profile.bundles.includes(name)) {
-      manifest.dsh.profile.bundles.push(name)
-    }
-  }
-
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
-  console.log(`shipped plugins: registered ${shippedNames.join(', ')} into profile at ${profileDir}`)
+  await mkdir(dshHome, { recursive: true })
+  await mkdir(join(dshHome, 'profiles'), { recursive: true })
+  await cp(defaultProfileDir, profileDir, { recursive: true })
+  console.log(`seeded default-profile at ${profileDir}`)
 }
 
 /**
@@ -229,7 +134,7 @@ async function ensureShippedPlugins(dshHome, shippedRoot) {
  * @throws when the kernel cannot be started or never becomes ready
  */
 async function startKernel() {
-  const { binPath, nodePath, runElectronAsNode, root: kernelRoot } = resolveKernelPaths()
+  const { binPath, nodePath, runElectronAsNode } = resolveKernelPaths()
   if (!existsSync(binPath)) {
     throw new Error(
       `The kernel is not installed at:\n  ${binPath}\n\nRun "npm run kernel:install" first.`,
@@ -247,14 +152,15 @@ async function startKernel() {
   const dshHome = join(app.getPath('userData'), 'kernel-home')
   await mkdir(dshHome, { recursive: true })
 
-  // Shipped plugins must be registered in the profile before the kernel starts, so
-  // their patch layers are part of the very first profile load. Failures here are
+  // Ship a bundled default-profile on first launch only. A user who already has a
+  // profile has installed things and made their own choices; the shell does not
+  // reach back into the bundled payload after this point. A failure here is
   // logged and swallowed — the user still gets a working shell, just without the
   // bundled defaults.
   try {
-    await ensureShippedPlugins(dshHome, join(kernelRoot, 'node_modules'))
+    await seedDefaultProfile(dshHome)
   } catch (error) {
-    console.warn(`shipped plugins bootstrap failed: ${error instanceof Error ? error.message : String(error)}`)
+    console.warn(`default-profile bootstrap failed: ${error instanceof Error ? error.message : String(error)}`)
   }
 
   const patchEntries = buildShellPatch()
